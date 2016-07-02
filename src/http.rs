@@ -18,7 +18,7 @@ impl ParserHandler for HttpParser {
     fn on_header_value(&mut self, s: &[u8]) -> bool {
         let mut headers = self.headers.lock().unwrap();
         headers.insert(self.current_key.clone().unwrap(),
-                    str::from_utf8(s).unwrap().to_string());
+                       str::from_utf8(s).unwrap().to_string());
         true
     }
 

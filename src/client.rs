@@ -16,7 +16,7 @@ use interface::WebSocketEvent;
 
 const WEBSOCKET_KEY: &'static [u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-fn gen_key(key: &String) -> String {
+fn gen_key(key: &str) -> String {
     let mut m = Sha1::new();
     let mut buf = [0u8; 20];
     m.update(key.as_bytes());
@@ -117,6 +117,7 @@ impl WebSocketClient {
 
                     if is_upgrade {
                         self.state = ClientState::HandshakeResponse;
+                        self.tx.lock().unwrap().send(WebSocketEvent::Connect(self.token));
                         self.interest.remove(EventSet::readable());
                         self.interest.insert(EventSet::writable());
                         break;

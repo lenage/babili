@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mio::*;
 use mio::tcp::*;
 
-use client::{WebSocketClient};
+use client::WebSocketClient;
 use interface::WebSocketEvent;
 
 pub const SERVER_TOKEN: Token = Token(0);
