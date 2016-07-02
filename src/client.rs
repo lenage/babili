@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::fmt;
-// use std::sync::mpsc;
+use std::error::Error;
+use std::sync::mpsc;
 
 use mio::*;
 use mio::tcp::*;
@@ -10,7 +11,8 @@ use sha1::Sha1;
 use rustc_serialize::base64::{ToBase64, STANDARD};
 
 use http::HttpParser;
-use frame::{WebSocketFrame};
+use frame::{WebSocketFrame, OpCode};
+use interface::WebSocketEvent;
 
 const WEBSOCKET_KEY: &'static [u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -34,10 +36,60 @@ pub struct WebSocketClient {
     headers: Arc<Mutex<HashMap<String, String>>>,
     pub interest: EventSet,
     state: ClientState,
-    outgoing: Vec<WebSocketFrame>
+    outgoing: Vec<WebSocketFrame>,
+    tx: Mutex<mpsc::Sender<WebSocketEvent>>,
+    event_loop_tx: Sender<WebSocketEvent>,
+    token: Token
 }
 
 impl WebSocketClient {
+    pub fn new(socket: TcpStream, token: Token, server_sink: mpsc::Sender<WebSocketEvent>,
+               event_loop_sink: Sender<WebSocketEvent>) -> WebSocketClient {
+        let headers = Arc::new(Mutex::new(HashMap::new()));
+        WebSocketClient {
+            socket: socket,
+            headers: headers.clone(),
+            interest: EventSet::readable(),
+            outgoing: Vec::new(),
+            state: ClientState::AwaitingHandshake(Mutex::new(Parser::request(HttpParser {
+                current_key: None,
+                headers: headers.clone()
+            }))),
+            tx: Mutex::new(server_sink),
+            event_loop_tx: event_loop_sink,
+            token: token,
+        }
+    }
+
+    pub fn send_message(&mut self, msg: WebSocketEvent) -> Result<(), String> {
+        let frame = match msg {
+            WebSocketEvent::TextMessage(_, ref data) => Some(WebSocketFrame::from(&*data.clone())),
+            WebSocketEvent::BinaryMessage(_, ref data) => Some(WebSocketFrame::from(data.clone())),
+            WebSocketEvent::Close(_) => {
+                let close_frame = try!(WebSocketFrame::close(0, b"Server-initiated close"));
+                Some(close_frame)
+            },
+            WebSocketEvent::Ping(_, ref payload) => Some(WebSocketFrame::ping(payload.clone())),
+            _ => None
+        };
+
+        if frame.is_none() {
+            return Err("Wrong message type to send".to_string());
+        }
+
+        self.outgoing.push(frame.unwrap());
+
+        if self.interest.is_readable() {
+            self.interest.insert(EventSet::writable());
+            self.interest.remove(EventSet::readable());
+
+            try!(self.event_loop_tx.send(WebSocketEvent::Reregister(self.token))
+                 .map_err(|e| e.description().to_string()));
+        }
+
+        Ok(())
+    }
+
     pub fn read(&mut self) {
         match self.state {
             ClientState::AwaitingHandshake(_) => self.read_handshake(),
@@ -78,16 +130,22 @@ impl WebSocketClient {
         let frame = WebSocketFrame::read(&mut self.socket);
         match frame {
             Ok(frame) => {
-                println!("{:?}", frame);
-
-                // Add a reply frame to the queue:
-                let reply_frame = WebSocketFrame::from("Hi there!");
-                self.outgoing.push(reply_frame);
-
-                // Switch the event subscription to the write mode if the queue is not empty:
-                if self.outgoing.len() > 0 {
-                    self.interest.remove(EventSet::readable());
-                    self.interest.insert(EventSet::writable());
+                match frame.get_opcode() {
+                    OpCode::TextFrame => {
+                        let payload = String::from_utf8(frame.payload).unwrap();
+                        self.tx.lock().unwrap().send(WebSocketEvent::TextMessage(self.token, payload));
+                    },
+                    OpCode::BinaryFrame => {
+                        self.tx.lock().unwrap().send(WebSocketEvent::BinaryMessage(self.token, frame.payload));
+                    },
+                    OpCode::Ping => {
+                        self.outgoing.push(WebSocketFrame::pong(&frame));
+                    },
+                    OpCode::ConnectionClose => {
+                        self.tx.lock().unwrap().send(WebSocketEvent::Close(self.token));
+                        self.outgoing.push(WebSocketFrame::close_from(&frame));
+                    },
+                    _ => {}
                 }
             },
             Err(e) => println!("error while reading frame: {}", e)
@@ -103,18 +161,30 @@ impl WebSocketClient {
     }
 
     fn write_frames(&mut self) {
-        println!("sending {} frames", self.outgoing.len());
+        let mut close_connection = false;
 
-        for frame in self.outgoing.iter() {
-            if let Err(e) = frame.write(&mut self.socket) {
-                println!("error on write: {}", e);
+        {
+            for frame in self.outgoing.iter() {
+                println!("outgoing {:?}", frame);
+
+                if let Err(e) = frame.write(&mut self.socket) {
+                    println!("error on write: {}", e);
+                }
+
+                if frame.is_close() {
+                    close_connection = true;
+                }
             }
         }
 
         self.outgoing.clear();
 
         self.interest.remove(EventSet::writable());
-        self.interest.insert(EventSet::readable());
+        self.interest.insert(if close_connection {
+            EventSet::hup()
+        } else {
+            EventSet::readable()
+        });
     }
 
     fn write_handshake(&mut self) {
@@ -126,22 +196,8 @@ impl WebSocketClient {
                                                  Upgrade: websocket\r\n\r\n", response_key));
         self.socket.try_write(response.as_bytes()).unwrap();
         self.state = ClientState::Connected;
+        self.tx.lock().unwrap().send(WebSocketEvent::Connect(self.token));
         self.interest.remove(EventSet::writable());
         self.interest.insert(EventSet::readable());
-    }
-
-
-    pub fn new(socket: TcpStream) -> WebSocketClient {
-        let headers = Arc::new(Mutex::new(HashMap::new()));
-        WebSocketClient {
-            socket: socket,
-            headers: headers.clone(),
-            interest: EventSet::readable(),
-            outgoing: Vec::new(),
-            state: ClientState::AwaitingHandshake(Mutex::new(Parser::request(HttpParser {
-                current_key: None,
-                headers: headers.clone()
-            }))),
-        }
     }
 }

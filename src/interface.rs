@@ -36,6 +36,7 @@ impl WebSocket {
 
         let (tx, rx) = mpsc::channel();
 
+        println!("{:?}", tx);
         thread::spawn(move || {
             let server_socket = TcpListener::bind(&address).unwrap();
 

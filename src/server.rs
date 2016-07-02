@@ -16,6 +16,7 @@ pub struct WebSocketServerState {
     clients: Arc<RwLock<HashMap<Token, WebSocketClient>>>,
     token_counter: Arc<AtomicUsize>
 }
+
 impl WebSocketServerState {
     pub fn new() -> WebSocketServerState {
         WebSocketServerState {
